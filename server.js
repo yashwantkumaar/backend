@@ -12,7 +12,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*",
+    origin: "*", // In production, set to your Netlify URL
     methods: ["GET", "POST"],
   },
   pingTimeout: 30000,
@@ -105,7 +105,7 @@ io.on("connection", (socket) => {
       (p) => p.name.toLowerCase() === cleanName.toLowerCase(),
     );
 
-    let joinType = "new"; // 'new', 'rejoin', or 'late'
+    let joinType = "new";
 
     if (existingPlayer) {
       if (existingPlayer.offline) {
@@ -125,7 +125,7 @@ io.on("connection", (socket) => {
       }
     }
 
-    // If it's a rejoin or a late join (game already started), require Host Approval
+    // Require Host Approval for rejoins and late joins
     if (joinType === "rejoin" || joinType === "late") {
       if (!room.pendingJoins) room.pendingJoins = {};
       room.pendingJoins[socket.id] = {
@@ -134,7 +134,7 @@ io.on("connection", (socket) => {
         type: joinType,
       };
 
-      socket.emit("waiting-for-approval"); // Tell client to wait
+      socket.emit("waiting-for-approval");
 
       // Notify Host
       io.to(room.hostSocketId).emit("join-request", {
@@ -161,7 +161,7 @@ io.on("connection", (socket) => {
       return;
 
     const requestData = room.pendingJoins[targetSocketId];
-    delete room.pendingJoins[targetSocketId]; // Clear request
+    delete room.pendingJoins[targetSocketId];
 
     const targetSocket = io.sockets.sockets.get(targetSocketId);
     if (!targetSocket) return; // Player disconnected while waiting
@@ -262,18 +262,28 @@ io.on("connection", (socket) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "playing" || room.gameState.spinning)
       return;
+
     room.gameState.spinning = true;
     room.gameState.phase = "spinning";
+
+    // Skip eliminated and offline players
     const activePlayers = room.players.filter(
       (p) => !p.eliminated && !p.offline,
     );
-    if (activePlayers.length === 0) return;
+    if (activePlayers.length === 0) {
+      room.gameState.spinning = false;
+      room.gameState.phase = "playing";
+      return;
+    }
+
     const picked =
       activePlayers[Math.floor(Math.random() * activePlayers.length)];
     room.gameState.currentPlayer = picked.name;
     room.gameState.currentPlayerId = picked.socketId;
+
     broadcastRoom(room.id);
     io.to(room.id).emit("spin-started", { targetPlayer: picked.name });
+
     setTimeout(() => {
       room.gameState.spinning = false;
       room.gameState.phase = "choice";
@@ -294,6 +304,7 @@ io.on("connection", (socket) => {
       room.hostSocketId !== socket.id
     )
       return;
+
     room.gameState.currentTask = { type, text: questionText };
     room.gameState.phase = "task";
     broadcastRoom(room.id);
@@ -313,6 +324,7 @@ io.on("connection", (socket) => {
       room.hostSocketId !== socket.id
     )
       return;
+
     room.gameState.currentTask = { type, text: questionText };
     broadcastRoom(room.id);
     io.to(room.id).emit("task-assigned", {
@@ -331,10 +343,12 @@ io.on("connection", (socket) => {
       room.hostSocketId !== socket.id
     )
       return;
+
     const player = room.players.find(
       (p) => p.name === room.gameState.currentPlayer,
     );
     if (player) player.stats[type] = (player.stats[type] || 0) + 1;
+
     room.gameState.round++;
     room.gameState.phase = "playing";
     room.gameState.currentTask = null;
@@ -372,12 +386,14 @@ io.on("connection", (socket) => {
     if (!room || room.hostSocketId !== socket.id) return;
     const target = room.players.find((p) => p.name === playerName && !p.isHost);
     if (!target) return;
+
     const targetSocket = io.sockets.sockets.get(target.socketId);
     if (targetSocket) {
       targetSocket.emit("kicked", {
         message: "You were removed from the room by the host.",
       });
       targetSocket.leave(room.id);
+      targetSocket.data.roomId = null;
     }
     room.players = room.players.filter((p) => p.name !== playerName);
     io.to(room.id).emit("player-left", { playerName, kicked: true });
@@ -403,6 +419,7 @@ io.on("connection", (socket) => {
     const roomId = socket.data.roomId;
     const playerName = socket.data.playerName;
     if (!roomId) return;
+
     const room = rooms.get(roomId);
     if (!room) return;
 
@@ -410,6 +427,7 @@ io.on("connection", (socket) => {
     if (player) {
       player.offline = true;
       io.to(roomId).emit("player-left", { playerName, offline: true });
+
       if (player.isHost) {
         player.isHost = false;
         const nextOnline = room.players.find((p) => !p.offline);
@@ -419,7 +437,13 @@ io.on("connection", (socket) => {
           io.to(roomId).emit("host-changed", { newHost: nextOnline.name });
         }
       }
-      broadcastRoom(roomId);
+
+      const activePlayers = room.players.filter((p) => !p.offline);
+      if (activePlayers.length === 0) {
+        rooms.delete(roomId);
+      } else {
+        broadcastRoom(roomId);
+      }
     }
   });
 });
