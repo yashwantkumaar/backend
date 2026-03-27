@@ -1,7 +1,8 @@
 /*
+  =========================================================
   IGNITE Party Game — Multiplayer Room Server
   Stack: Node.js + Express + Socket.io
-  Deploy to: Railway / Render / Fly.io (free tier works fine)
+  =========================================================
 */
 
 const express = require("express");
@@ -11,29 +12,32 @@ const { Server } = require("socket.io");
 const app = express();
 const server = http.createServer(app);
 
+// Configure Socket.io with CORS
 const io = new Server(server, {
   cors: {
-    origin: "*", // In production, set to your Netlify URL e.g. "https://truthordarewithfrndss.netlify.app"
+    origin: "*", // Set to your Netlify URL in production for better security
     methods: ["GET", "POST"],
   },
   pingTimeout: 30000,
   pingInterval: 10000,
 });
 
-// ── In-memory room store ──────────────────────────────────────────────────────
+// ── IN-MEMORY DATABASE ────────────────────────────────────────────────────────
+// In a real large-scale app you'd use Redis/Database, but a Map is perfect here.
 const rooms = new Map();
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// ── HELPER FUNCTIONS ──────────────────────────────────────────────────────────
 function generateRoomId() {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let id = "";
-  for (let i = 0; i < 6; i++)
+  for (let i = 0; i < 6; i++) {
     id += chars[Math.floor(Math.random() * chars.length)];
+  }
   return id;
 }
 
 function getPublicRoom(room) {
-  // Strip internal ids from player objects for safety
+  // Strip internal/private data before sending state to all clients
   return {
     ...room,
     players: room.players.map((p) => ({
@@ -41,22 +45,25 @@ function getPublicRoom(room) {
       emoji: p.emoji,
       isHost: p.isHost,
       eliminated: p.eliminated || false,
+      offline: p.offline || false, // Track if they disconnected
       stats: p.stats,
-      socketId: p.socketId, // needed by clients to know "which slot am I"
+      socketId: p.socketId, // Sent so clients know who they are
     })),
   };
 }
 
 function broadcastRoom(roomId) {
   const room = rooms.get(roomId);
-  if (room) io.to(roomId).emit("room-update", getPublicRoom(room));
+  if (room) {
+    io.to(roomId).emit("room-update", getPublicRoom(room));
+  }
 }
 
-// ── Socket events ─────────────────────────────────────────────────────────────
+// ── SOCKET EVENT LISTENERS ────────────────────────────────────────────────────
 io.on("connection", (socket) => {
-  console.log(`[+] ${socket.id} connected`);
+  console.log(`[CONNECTION] New client connected: ${socket.id}`);
 
-  // ── CREATE ROOM ────────────────────────────────────────────────────────────
+  // ── 1. CREATE ROOM ──────────────────────────────────────────────────────────
   socket.on("create-room", ({ playerName, emoji, difficulty, gameMode }) => {
     if (!playerName || playerName.trim().length === 0) {
       return socket.emit("error", { message: "Player name is required." });
@@ -64,6 +71,7 @@ io.on("connection", (socket) => {
 
     let roomId;
     let tries = 0;
+    // Ensure we don't accidentally overwrite an existing room
     do {
       roomId = generateRoomId();
       tries++;
@@ -79,6 +87,7 @@ io.on("connection", (socket) => {
           emoji: emoji || "😄",
           isHost: true,
           eliminated: false,
+          offline: false, // New offline tracking
           stats: { truth: 0, dare: 0, skip: 0 },
         },
       ],
@@ -98,37 +107,72 @@ io.on("connection", (socket) => {
 
     rooms.set(roomId, room);
     socket.join(roomId);
+
+    // Save to socket data for quick access on disconnect
     socket.data.roomId = roomId;
     socket.data.playerName = playerName.trim();
 
     socket.emit("room-created", { roomId, room: getPublicRoom(room) });
-    console.log(`[ROOM] Created ${roomId} by ${playerName}`);
+    console.log(`[CREATE] Room ${roomId} created by ${playerName.trim()}`);
   });
 
-  // ── JOIN ROOM ──────────────────────────────────────────────────────────────
+  // ── 2. JOIN ROOM & RECONNECT LOGIC ──────────────────────────────────────────
   socket.on("join-room", ({ roomId, playerName, emoji }) => {
     const id = (roomId || "").toUpperCase().trim();
     const room = rooms.get(id);
 
-    if (!room)
+    if (!room) {
       return socket.emit("error", {
-        message: "Room not found. Check the code and try again.",
+        message: "Room not found. Check the code.",
       });
-    if (room.players.length >= 8)
-      return socket.emit("error", { message: "Room is full! Max 8 players." });
-    if (room.gameState.phase !== "lobby")
-      return socket.emit("error", {
-        message: "Game has already started. Wait for the next round!",
-      });
-    if (!playerName || playerName.trim().length === 0)
-      return socket.emit("error", { message: "Player name is required." });
+    }
 
     const cleanName = playerName.trim().substring(0, 16);
-    if (
-      room.players.find((p) => p.name.toLowerCase() === cleanName.toLowerCase())
-    ) {
+    if (!cleanName) {
+      return socket.emit("error", { message: "Player name is required." });
+    }
+
+    // Check if player name already exists
+    const existingPlayer = room.players.find(
+      (p) => p.name.toLowerCase() === cleanName.toLowerCase(),
+    );
+
+    if (existingPlayer) {
+      // Reconnect logic: If they are offline, let them steal their spot back
+      if (existingPlayer.offline) {
+        existingPlayer.socketId = socket.id; // Update to new socket
+        existingPlayer.offline = false; // Mark back online
+
+        socket.join(id);
+        socket.data.roomId = id;
+        socket.data.playerName = cleanName;
+
+        socket.emit("room-joined", { roomId: id, room: getPublicRoom(room) });
+        io.to(id).emit("player-joined", {
+          playerName: cleanName,
+          emoji: existingPlayer.emoji,
+          rejoined: true,
+        });
+        broadcastRoom(id);
+
+        console.log(`[REJOIN] ${cleanName} reconnected to room ${id}`);
+        return;
+      } else {
+        // Name is taken and player is actively online
+        return socket.emit("error", {
+          message: `Name "${cleanName}" is already taken.`,
+        });
+      }
+    }
+
+    // Standard Join Logic
+    if (room.players.length >= 8) {
+      return socket.emit("error", { message: "Room is full! Max 8 players." });
+    }
+
+    if (room.gameState.phase !== "lobby") {
       return socket.emit("error", {
-        message: `"${cleanName}" is already taken in this room. Choose another name.`,
+        message: "Game in progress. Wait for them to finish.",
       });
     }
 
@@ -138,6 +182,7 @@ io.on("connection", (socket) => {
       emoji: emoji || "😄",
       isHost: false,
       eliminated: false,
+      offline: false,
       stats: { truth: 0, dare: 0, skip: 0 },
     });
 
@@ -149,87 +194,109 @@ io.on("connection", (socket) => {
     io.to(id).emit("player-joined", {
       playerName: cleanName,
       emoji: emoji || "😄",
+      rejoined: false,
     });
     broadcastRoom(id);
-    console.log(`[ROOM] ${cleanName} joined ${id}`);
+
+    console.log(`[JOIN] ${cleanName} joined room ${id}`);
   });
 
-  // ── UPDATE SETTINGS (host only) ────────────────────────────────────────────
+  // ── 3. LOBBY SETTINGS ───────────────────────────────────────────────────────
   socket.on("update-settings", ({ difficulty, gameMode }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
+
     room.settings.difficulty = difficulty || room.settings.difficulty;
     room.settings.gameMode = gameMode || room.settings.gameMode;
-    broadcastRoom(socket.data.roomId);
+    broadcastRoom(room.id);
   });
 
-  // ── START GAME (host only) ─────────────────────────────────────────────────
+  // ── 4. GAME FLOW (START / END / CLOSE) ──────────────────────────────────────
   socket.on("start-game", () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
-    if (room.players.length < 2)
+
+    // Check if there are at least 2 ONLINE players
+    const onlinePlayers = room.players.filter((p) => !p.offline);
+    if (onlinePlayers.length < 2) {
       return socket.emit("error", {
-        message: "Need at least 2 players to start.",
+        message: "Need at least 2 online players to start.",
       });
+    }
 
     room.gameState.phase = "playing";
     room.gameState.round = 1;
-    broadcastRoom(socket.data.roomId);
-    io.to(socket.data.roomId).emit("game-started", { settings: room.settings });
-    console.log(`[ROOM] Game started in ${socket.data.roomId}`);
+    broadcastRoom(room.id);
+    io.to(room.id).emit("game-started", { settings: room.settings });
+    console.log(`[START] Game started in room ${room.id}`);
   });
 
-  // ── END GAME & SHOW SUMMARY (host only) ────────────────────────────────────
+  // Host shows summary and resets room to lobby
   socket.on("end-game", () => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
+    const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
 
-    // Reset phase to lobby and tell all clients to show the summary
     room.gameState.phase = "lobby";
     room.gameState.round = 1;
     room.gameState.currentPlayer = null;
     room.gameState.currentTask = null;
     room.gameState.spinning = false;
 
-    // Reset stats for next game
     room.players.forEach((p) => {
       p.stats = { truth: 0, dare: 0, skip: 0 };
       p.eliminated = false;
     });
 
-    broadcastRoom(roomId);
-    io.to(roomId).emit("game-ended");
+    broadcastRoom(room.id);
+    io.to(room.id).emit("game-ended"); // Tells front end to show summary
+    console.log(`[END] Game ended in room ${room.id}. Showing summary.`);
   });
 
-  // ── SPIN (anyone can spin on their turn; host can always spin) ─────────────
-  socket.on("spin", () => {
+  // Host permanently closes the room
+  socket.on("close-room", () => {
     const roomId = socket.data.roomId;
     const room = rooms.get(roomId);
-    if (!room) return;
-    if (room.gameState.phase !== "playing") return;
-    if (room.gameState.spinning) return;
+    if (!room || room.hostSocketId !== socket.id) return;
+
+    io.to(roomId).emit("room-closed"); // Tells all players to leave
+    rooms.delete(roomId);
+    console.log(`[CLOSE] Room ${roomId} was permanently closed by host.`);
+  });
+
+  // ── 5. SPIN THE BOTTLE ──────────────────────────────────────────────────────
+  socket.on("spin", () => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "playing" || room.gameState.spinning)
+      return;
 
     room.gameState.spinning = true;
     room.gameState.phase = "spinning";
 
-    const activePlayers = room.players.filter((p) => !p.eliminated);
-    if (activePlayers.length === 0) return;
+    // Exclude offline and eliminated players from being picked
+    const activePlayers = room.players.filter(
+      (p) => !p.eliminated && !p.offline,
+    );
+    if (activePlayers.length === 0) {
+      // Edge case: Everyone went offline or died
+      room.gameState.spinning = false;
+      room.gameState.phase = "playing";
+      return;
+    }
 
     const picked =
       activePlayers[Math.floor(Math.random() * activePlayers.length)];
     room.gameState.currentPlayer = picked.name;
     room.gameState.currentPlayerId = picked.socketId;
 
-    broadcastRoom(roomId);
-    io.to(roomId).emit("spin-started", { targetPlayer: picked.name });
+    broadcastRoom(room.id);
+    io.to(room.id).emit("spin-started", { targetPlayer: picked.name });
 
-    // Reveal after 2.8s (matches frontend animation duration)
+    // Wait for the CSS animation to finish on the front end
     setTimeout(() => {
       room.gameState.spinning = false;
       room.gameState.phase = "choice";
-      broadcastRoom(roomId);
-      io.to(roomId).emit("spin-result", {
+      broadcastRoom(room.id);
+      io.to(room.id).emit("spin-result", {
         player: picked.name,
         playerId: picked.socketId,
         round: room.gameState.round,
@@ -237,14 +304,11 @@ io.on("connection", (socket) => {
     }, 2800);
   });
 
-  // ── PICK TASK (the picked player or host picks truth/dare) ─────────────────
+  // ── 6. TASKS & QUESTIONS ────────────────────────────────────────────────────
   socket.on("pick-task", ({ type, questionText }) => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room) return;
-    if (room.gameState.phase !== "choice") return;
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "choice") return;
 
-    // Only the current player or host can pick
     const isCurrentPlayer =
       socket.data.playerName === room.gameState.currentPlayer;
     const isHost = room.hostSocketId === socket.id;
@@ -252,8 +316,9 @@ io.on("connection", (socket) => {
 
     room.gameState.currentTask = { type, text: questionText };
     room.gameState.phase = "task";
-    broadcastRoom(roomId);
-    io.to(roomId).emit("task-assigned", {
+    broadcastRoom(room.id);
+
+    io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
       player: room.gameState.currentPlayer,
@@ -261,19 +326,20 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ── NEW QUESTION (skip to new question, same type) ─────────────────────────
+  // Used for "Skip" and "Switch to Dare"
   socket.on("new-question", ({ type, questionText }) => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
+    const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "task") return;
+
     const isCurrentPlayer =
       socket.data.playerName === room.gameState.currentPlayer;
     const isHost = room.hostSocketId === socket.id;
     if (!isCurrentPlayer && !isHost) return;
 
     room.gameState.currentTask = { type, text: questionText };
-    broadcastRoom(roomId);
-    io.to(roomId).emit("task-assigned", {
+    broadcastRoom(room.id);
+
+    io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
       player: room.gameState.currentPlayer,
@@ -281,11 +347,10 @@ io.on("connection", (socket) => {
     });
   });
 
-  // ── COMPLETE TASK ──────────────────────────────────────────────────────────
   socket.on("complete-task", ({ type }) => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
+    const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "task") return;
+
     const isCurrentPlayer =
       socket.data.playerName === room.gameState.currentPlayer;
     const isHost = room.hostSocketId === socket.id;
@@ -294,7 +359,9 @@ io.on("connection", (socket) => {
     const player = room.players.find(
       (p) => p.name === room.gameState.currentPlayer,
     );
-    if (player) player.stats[type] = (player.stats[type] || 0) + 1;
+    if (player) {
+      player.stats[type] = (player.stats[type] || 0) + 1;
+    }
 
     room.gameState.round++;
     room.gameState.phase = "playing";
@@ -302,14 +369,16 @@ io.on("connection", (socket) => {
     room.gameState.currentPlayer = null;
     room.gameState.currentPlayerId = null;
 
-    broadcastRoom(roomId);
-    io.to(roomId).emit("task-completed", { type, round: room.gameState.round });
+    broadcastRoom(room.id);
+    io.to(room.id).emit("task-completed", {
+      type,
+      round: room.gameState.round,
+    });
   });
 
-  // ── CHAT ──────────────────────────────────────────────────────────────────
+  // ── 7. CHAT & REACTIONS ─────────────────────────────────────────────────────
   socket.on("chat-message", ({ message }) => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
+    const room = rooms.get(socket.data.roomId);
     if (!room || !message || !message.trim()) return;
 
     const msg = {
@@ -320,28 +389,27 @@ io.on("connection", (socket) => {
     };
 
     room.chat.push(msg);
+    // Keep chat history lightweight
     if (room.chat.length > 100) room.chat = room.chat.slice(-100);
 
-    io.to(roomId).emit("chat-message", msg);
+    io.to(room.id).emit("chat-message", msg);
   });
 
-  // ── REACTION ─────────────────────────────────────────────────────────────
   socket.on("reaction", ({ emoji }) => {
     const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room) return;
-    io.to(roomId).emit("reaction", {
-      player: socket.data.playerName,
-      emoji,
-      id: Date.now() + Math.random(),
-    });
+    if (roomId) {
+      io.to(roomId).emit("reaction", {
+        player: socket.data.playerName,
+        emoji,
+        id: Date.now() + Math.random(),
+      });
+    }
   });
 
-  // ── KICK PLAYER (host only) ───────────────────────────────────────────────
+  // ── 8. HOST MODERATION ──────────────────────────────────────────────────────
   socket.on("kick-player", ({ playerName }) => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room || room.hostSocketId !== socket.id) return;
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.hostSocketId !== socket.id) return; // Only host can kick
 
     const target = room.players.find((p) => p.name === playerName && !p.isHost);
     if (!target) return;
@@ -351,77 +419,104 @@ io.on("connection", (socket) => {
       targetSocket.emit("kicked", {
         message: "You were removed from the room by the host.",
       });
-      targetSocket.leave(roomId);
+      targetSocket.leave(room.id);
       targetSocket.data.roomId = null;
     }
 
+    // Remove player from memory
     room.players = room.players.filter((p) => p.name !== playerName);
-    io.to(roomId).emit("player-left", { playerName });
-    broadcastRoom(roomId);
+    io.to(room.id).emit("player-left", { playerName, kicked: true });
+    broadcastRoom(room.id);
   });
 
-  // ── NEVER HAVE I EVER: admit ──────────────────────────────────────────────
+  // ── 9. NEVER HAVE I EVER LOGIC ──────────────────────────────────────────────
   socket.on("nihhi-admit", ({ admitted, round }) => {
     const roomId = socket.data.roomId;
-    if (!roomId) return;
-    io.to(roomId).emit("nihhi-admit", {
-      player: socket.data.playerName,
-      admitted,
-      round,
-    });
+    if (roomId) {
+      io.to(roomId).emit("nihhi-admit", {
+        player: socket.data.playerName,
+        admitted,
+        round,
+      });
+    }
   });
 
   socket.on("nihhi-next", ({ questionText, round }) => {
-    const roomId = socket.data.roomId;
-    const room = rooms.get(roomId);
-    if (!room || room.hostSocketId !== socket.id) return;
-    io.to(roomId).emit("nihhi-question", { text: questionText, round });
+    const room = rooms.get(socket.data.roomId);
+    if (room && room.hostSocketId === socket.id) {
+      io.to(room.id).emit("nihhi-question", { text: questionText, round });
+    }
   });
 
-  // ── DISCONNECT ────────────────────────────────────────────────────────────
+  // ── 10. DISCONNECT HANDLING ─────────────────────────────────────────────────
   socket.on("disconnect", () => {
     const roomId = socket.data.roomId;
     const playerName = socket.data.playerName;
+
+    console.log(`[DISCONNECT] ${playerName || socket.id} disconnected.`);
     if (!roomId) return;
 
     const room = rooms.get(roomId);
     if (!room) return;
 
-    const wasHost = room.hostSocketId === socket.id;
-    room.players = room.players.filter((p) => p.socketId !== socket.id);
+    const player = room.players.find((p) => p.socketId === socket.id);
+    if (player) {
+      // Mark them offline so they can rejoin instead of destroying their stats
+      player.offline = true;
+      io.to(roomId).emit("player-left", {
+        playerName,
+        offline: true,
+        kicked: false,
+      });
 
-    if (room.players.length === 0) {
-      rooms.delete(roomId);
-      console.log(`[ROOM] ${roomId} deleted (empty)`);
-      return;
+      // If the Host disconnected, we need to pass the crown
+      if (player.isHost) {
+        player.isHost = false;
+        // Find the next person who is actually online
+        const nextOnline = room.players.find((p) => !p.offline);
+
+        if (nextOnline) {
+          nextOnline.isHost = true;
+          room.hostSocketId = nextOnline.socketId;
+          io.to(roomId).emit("host-changed", { newHost: nextOnline.name });
+          console.log(
+            `[HOST TRANSFER] Host passed to ${nextOnline.name} in room ${roomId}`,
+          );
+        }
+      }
+
+      // Check if the room is now completely empty
+      const activePlayers = room.players.filter((p) => !p.offline);
+      if (activePlayers.length === 0) {
+        rooms.delete(roomId);
+        console.log(
+          `[CLEANUP] Room ${roomId} deleted because all players disconnected.`,
+        );
+      } else {
+        broadcastRoom(roomId);
+      }
     }
-
-    if (wasHost && room.players.length > 0) {
-      // Transfer host
-      room.players[0].isHost = true;
-      room.hostSocketId = room.players[0].socketId;
-      io.to(roomId).emit("host-changed", { newHost: room.players[0].name });
-    }
-
-    io.to(roomId).emit("player-left", { playerName });
-    broadcastRoom(roomId);
-    console.log(`[-] ${playerName} left ${roomId}`);
   });
 });
 
-// ── REST endpoints ────────────────────────────────────────────────────────────
-app.get("/", (req, res) =>
-  res.json({ status: "IGNITE server running 🔥", rooms: rooms.size }),
-);
-app.get("/health", (req, res) =>
+// ── REST API / HEALTH CHECKS ──────────────────────────────────────────────────
+app.get("/", (req, res) => {
+  res.json({ status: "IGNITE server running 🔥", activeRooms: rooms.size });
+});
+
+app.get("/health", (req, res) => {
+  const totalPlayers = [...rooms.values()].reduce(
+    (acc, r) => acc + r.players.length,
+    0,
+  );
   res.json({
     ok: true,
     rooms: rooms.size,
-    players: [...rooms.values()].reduce((a, r) => a + r.players.length, 0),
-  }),
-);
+    players: totalPlayers,
+  });
+});
 
-// ── Start ─────────────────────────────────────────────────────────────────────
+// ── SERVER START ──────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`🔥 IGNITE multiplayer server running on port ${PORT}`);
