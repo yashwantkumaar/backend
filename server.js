@@ -12,7 +12,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*", // In production, set to your Netlify URL
+    origin: "*", 
     methods: ["GET", "POST"],
   },
   pingTimeout: 30000,
@@ -55,6 +55,7 @@ io.on("connection", (socket) => {
   socket.on("create-room", ({ playerName, emoji, difficulty, gameMode }) => {
     if (!playerName || playerName.trim().length === 0)
       return socket.emit("error", { message: "Player name is required." });
+    
     let roomId;
     do {
       roomId = generateRoomId();
@@ -63,7 +64,7 @@ io.on("connection", (socket) => {
     const room = {
       id: roomId,
       hostSocketId: socket.id,
-      pendingJoins: {}, // Tracks players waiting for host approval
+      pendingJoins: {}, 
       players: [
         {
           socketId: socket.id,
@@ -111,32 +112,22 @@ io.on("connection", (socket) => {
       if (existingPlayer.offline) {
         joinType = "rejoin";
       } else {
-        return socket.emit("error", {
-          message: `Name "${cleanName}" is already taken.`,
-        });
+        return socket.emit("error", { message: `Name "${cleanName}" is already taken.` });
       }
     } else {
       if (room.players.length >= 8)
-        return socket.emit("error", {
-          message: "Room is full! Max 8 players.",
-        });
+        return socket.emit("error", { message: "Room is full! Max 8 players." });
+      
       if (room.gameState.phase !== "lobby") {
         joinType = "late";
       }
     }
 
-    // Require Host Approval for rejoins and late joins
     if (joinType === "rejoin" || joinType === "late") {
       if (!room.pendingJoins) room.pendingJoins = {};
-      room.pendingJoins[socket.id] = {
-        playerName: cleanName,
-        emoji: emoji || "😄",
-        type: joinType,
-      };
+      room.pendingJoins[socket.id] = { playerName: cleanName, emoji: emoji || "😄", type: joinType };
 
       socket.emit("waiting-for-approval");
-
-      // Notify Host
       io.to(room.hostSocketId).emit("join-request", {
         targetSocketId: socket.id,
         playerName: cleanName,
@@ -145,49 +136,30 @@ io.on("connection", (socket) => {
       return;
     }
 
-    // Normal join in Lobby phase
     executeJoin(socket, room, cleanName, emoji || "😄", false);
   });
 
-  // Host answers the request
   socket.on("resolve-join-request", ({ targetSocketId, approved }) => {
     const room = rooms.get(socket.data.roomId);
-    if (
-      !room ||
-      room.hostSocketId !== socket.id ||
-      !room.pendingJoins ||
-      !room.pendingJoins[targetSocketId]
-    )
-      return;
+    if (!room || room.hostSocketId !== socket.id || !room.pendingJoins || !room.pendingJoins[targetSocketId]) return;
 
     const requestData = room.pendingJoins[targetSocketId];
     delete room.pendingJoins[targetSocketId];
 
     const targetSocket = io.sockets.sockets.get(targetSocketId);
-    if (!targetSocket) return; // Player disconnected while waiting
+    if (!targetSocket) return;
 
     if (approved) {
-      executeJoin(
-        targetSocket,
-        room,
-        requestData.playerName,
-        requestData.emoji,
-        requestData.type === "rejoin",
-      );
+      executeJoin(targetSocket, room, requestData.playerName, requestData.emoji, requestData.type === "rejoin");
     } else {
-      targetSocket.emit("join-denied", {
-        message: "The host declined your request to join.",
-      });
+      targetSocket.emit("join-denied", { message: "The host declined your request." });
     }
   });
 
   function executeJoin(targetSocket, room, playerName, emoji, isRejoin) {
     if (isRejoin) {
       const p = room.players.find((x) => x.name === playerName);
-      if (p) {
-        p.socketId = targetSocket.id;
-        p.offline = false;
-      }
+      if (p) { p.socketId = targetSocket.id; p.offline = false; }
     } else {
       room.players.push({
         socketId: targetSocket.id,
@@ -203,15 +175,9 @@ io.on("connection", (socket) => {
     targetSocket.join(room.id);
     targetSocket.data.roomId = room.id;
     targetSocket.data.playerName = playerName;
-    targetSocket.emit("room-joined", {
-      roomId: room.id,
-      room: getPublicRoom(room),
-    });
-    io.to(room.id).emit("player-joined", {
-      playerName,
-      emoji,
-      rejoined: isRejoin,
-    });
+    
+    targetSocket.emit("room-joined", { roomId: room.id, room: getPublicRoom(room) });
+    io.to(room.id).emit("player-joined", { playerName, emoji, rejoined: isRejoin });
     broadcastRoom(room.id);
   }
 
@@ -226,14 +192,84 @@ io.on("connection", (socket) => {
   socket.on("start-game", () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
-    if (room.players.filter((p) => !p.offline).length < 2)
-      return socket.emit("error", {
-        message: "Need at least 2 online players to start.",
-      });
     room.gameState.phase = "playing";
     room.gameState.round = 1;
     broadcastRoom(socket.data.roomId);
     io.to(socket.data.roomId).emit("game-started", { settings: room.settings });
+  });
+
+  socket.on("spin", () => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "playing" || room.gameState.spinning) return;
+
+    room.gameState.spinning = true;
+    room.gameState.phase = "spinning";
+
+    const activePlayers = room.players.filter((p) => !p.eliminated && !p.offline);
+    if (activePlayers.length === 0) {
+      room.gameState.spinning = false;
+      room.gameState.phase = "playing";
+      return;
+    }
+
+    const picked = activePlayers[Math.floor(Math.random() * activePlayers.length)];
+    room.gameState.currentPlayer = picked.name;
+    room.gameState.currentPlayerId = picked.socketId;
+
+    io.to(room.id).emit("spin-started", { targetPlayer: picked.name });
+
+    setTimeout(() => {
+      room.gameState.spinning = false;
+      room.gameState.phase = "choice";
+      broadcastRoom(room.id);
+      io.to(room.id).emit("spin-result", {
+        player: picked.name,
+        round: room.gameState.round,
+      });
+    }, 2800);
+  });
+
+  socket.on("pick-task", ({ type, questionText }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "choice") return;
+
+    room.gameState.currentTask = { type, text: questionText };
+    room.gameState.phase = "task";
+    broadcastRoom(room.id);
+    io.to(room.id).emit("task-assigned", {
+      type,
+      text: questionText,
+      player: room.gameState.currentPlayer,
+    });
+  });
+
+  socket.on("new-question", ({ type, questionText }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "task") return;
+
+    room.gameState.currentTask = { type, text: questionText };
+    broadcastRoom(room.id);
+    io.to(room.id).emit("task-assigned", {
+      type,
+      text: questionText,
+      player: room.gameState.currentPlayer,
+    });
+  });
+
+  socket.on("complete-task", ({ type }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "task") return;
+
+    const player = room.players.find((p) => p.name === room.gameState.currentPlayer);
+    if (player) player.stats[type] = (player.stats[type] || 0) + 1;
+
+    room.gameState.round++;
+    room.gameState.phase = "playing";
+    room.gameState.currentTask = null;
+    broadcastRoom(room.id);
+    io.to(room.id).emit("task-completed", {
+      round: room.gameState.round,
+    });
   });
 
   socket.on("end-game", () => {
@@ -242,7 +278,6 @@ io.on("connection", (socket) => {
     room.gameState.phase = "lobby";
     room.gameState.round = 1;
     room.gameState.currentPlayer = null;
-    room.gameState.spinning = false;
     room.players.forEach((p) => {
       p.stats = { truth: 0, dare: 0, skip: 0 };
       p.eliminated = false;
@@ -258,112 +293,10 @@ io.on("connection", (socket) => {
     rooms.delete(socket.data.roomId);
   });
 
-  socket.on("spin", () => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.gameState.phase !== "playing" || room.gameState.spinning)
-      return;
-
-    room.gameState.spinning = true;
-    room.gameState.phase = "spinning";
-
-    // Skip eliminated and offline players
-    const activePlayers = room.players.filter(
-      (p) => !p.eliminated && !p.offline,
-    );
-    if (activePlayers.length === 0) {
-      room.gameState.spinning = false;
-      room.gameState.phase = "playing";
-      return;
-    }
-
-    const picked =
-      activePlayers[Math.floor(Math.random() * activePlayers.length)];
-    room.gameState.currentPlayer = picked.name;
-    room.gameState.currentPlayerId = picked.socketId;
-
-    broadcastRoom(room.id);
-    io.to(room.id).emit("spin-started", { targetPlayer: picked.name });
-
-    setTimeout(() => {
-      room.gameState.spinning = false;
-      room.gameState.phase = "choice";
-      broadcastRoom(room.id);
-      io.to(room.id).emit("spin-result", {
-        player: picked.name,
-        playerId: picked.socketId,
-        round: room.gameState.round,
-      });
-    }, 2800);
-  });
-
-  socket.on("pick-task", ({ type, questionText }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.gameState.phase !== "choice") return;
-    if (
-      socket.data.playerName !== room.gameState.currentPlayer &&
-      room.hostSocketId !== socket.id
-    )
-      return;
-
-    room.gameState.currentTask = { type, text: questionText };
-    room.gameState.phase = "task";
-    broadcastRoom(room.id);
-    io.to(room.id).emit("task-assigned", {
-      type,
-      text: questionText,
-      player: room.gameState.currentPlayer,
-      playerId: room.gameState.currentPlayerId,
-    });
-  });
-
-  socket.on("new-question", ({ type, questionText }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.gameState.phase !== "task") return;
-    if (
-      socket.data.playerName !== room.gameState.currentPlayer &&
-      room.hostSocketId !== socket.id
-    )
-      return;
-
-    room.gameState.currentTask = { type, text: questionText };
-    broadcastRoom(room.id);
-    io.to(room.id).emit("task-assigned", {
-      type,
-      text: questionText,
-      player: room.gameState.currentPlayer,
-      playerId: room.gameState.currentPlayerId,
-    });
-  });
-
-  socket.on("complete-task", ({ type }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.gameState.phase !== "task") return;
-    if (
-      socket.data.playerName !== room.gameState.currentPlayer &&
-      room.hostSocketId !== socket.id
-    )
-      return;
-
-    const player = room.players.find(
-      (p) => p.name === room.gameState.currentPlayer,
-    );
-    if (player) player.stats[type] = (player.stats[type] || 0) + 1;
-
-    room.gameState.round++;
-    room.gameState.phase = "playing";
-    room.gameState.currentTask = null;
-    broadcastRoom(room.id);
-    io.to(room.id).emit("task-completed", {
-      type,
-      round: room.gameState.round,
-    });
-  });
-
   socket.on("chat-message", ({ message }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || !message.trim()) return;
     const msg = {
-      id: Date.now(),
       player: socket.data.playerName,
       message: message.trim().substring(0, 200),
       ts: Date.now(),
@@ -389,35 +322,16 @@ io.on("connection", (socket) => {
 
     const targetSocket = io.sockets.sockets.get(target.socketId);
     if (targetSocket) {
-      targetSocket.emit("kicked", {
-        message: "You were removed from the room by the host.",
-      });
+      targetSocket.emit("kicked", { message: "You were removed by the host." });
       targetSocket.leave(room.id);
-      targetSocket.data.roomId = null;
     }
     room.players = room.players.filter((p) => p.name !== playerName);
     io.to(room.id).emit("player-left", { playerName, kicked: true });
     broadcastRoom(room.id);
   });
 
-  socket.on("nihhi-admit", ({ admitted, round }) => {
-    if (socket.data.roomId)
-      io.to(socket.data.roomId).emit("nihhi-admit", {
-        player: socket.data.playerName,
-        admitted,
-        round,
-      });
-  });
-
-  socket.on("nihhi-next", ({ questionText, round }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (room && room.hostSocketId === socket.id)
-      io.to(room.id).emit("nihhi-question", { text: questionText, round });
-  });
-
   socket.on("disconnect", () => {
     const roomId = socket.data.roomId;
-    const playerName = socket.data.playerName;
     if (!roomId) return;
 
     const room = rooms.get(roomId);
@@ -426,7 +340,7 @@ io.on("connection", (socket) => {
     const player = room.players.find((p) => p.socketId === socket.id);
     if (player) {
       player.offline = true;
-      io.to(roomId).emit("player-left", { playerName, offline: true });
+      io.to(roomId).emit("player-left", { playerName: player.name, offline: true });
 
       if (player.isHost) {
         player.isHost = false;
@@ -448,6 +362,6 @@ io.on("connection", (socket) => {
   });
 });
 
-app.get("/", (req, res) => res.json({ status: "IGNITE server running 🔥" }));
+app.get("/", (req, res) => res.json({ status: "Online 🔥" }));
 const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => console.log(`🔥 Server on ${PORT}`));
