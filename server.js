@@ -95,32 +95,37 @@ io.on("connection", (socket) => {
     socket.data.playerName = playerName.trim();
     socket.emit("room-created", { roomId, room: getPublicRoom(room) });
   });
+
+  /* ══════════════════════════════════════════════════════════
+     💎 GEM MODE LISTENERS (Fixed State Sync)
+     ══════════════════════════════════════════════════════════ */
+  
   socket.on('spawn-gem', ({ x, y }) => {
-        // Find the room this player is in
-        const room = Array.from(socket.rooms).find(r => r !== socket.id);
-        if (room) {
-            // Broadcast the coordinates to everyone in the room
-            io.to(room).emit('spawn-gem', { x, y });
-        }
-    });
+    const room = rooms.get(socket.data.roomId);
+    if (room) io.to(room.id).emit('spawn-gem', { x, y });
+  });
 
-    // 2. A player clicks the gem! 
-    socket.on('claim-gem', ({ playerName }) => {
-        const room = Array.from(socket.rooms).find(r => r !== socket.id);
-        if (room) {
-            // Tell everyone who won it, so it instantly hides for the losers
-            io.to(room).emit('gem-claimed', { playerName });
-        }
-    });
+  socket.on('claim-gem', ({ playerName }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (room) io.to(room.id).emit('gem-claimed', { playerName });
+  });
 
-    // 3. A player uses their gems to skip a question
-    socket.on('gem-skip', ({ playerName }) => {
-        const room = Array.from(socket.rooms).find(r => r !== socket.id);
-        if (room) {
-            // Tell the room so everyone's screen updates and moves to the next turn
-            io.to(room).emit('gem-skip-used', { playerName });
-        }
-    });
+  socket.on('gem-skip', ({ playerName }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "task") return;
+
+    // 🚀 CRITICAL FIX: Update server state so the game doesn't freeze!
+    room.gameState.round++;
+    room.gameState.phase = "playing";
+    room.gameState.currentTask = null;
+    
+    broadcastRoom(room.id);
+    io.to(room.id).emit('gem-skip-used', { playerName, round: room.gameState.round });
+  });
+
+  /* ══════════════════════════════════════════════════════════
+     ROOM & GAMEPLAY LISTENERS
+     ══════════════════════════════════════════════════════════ */
 
   socket.on("join-room", ({ roomId, playerName, emoji }) => {
     const id = (roomId || "").toUpperCase().trim();
