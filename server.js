@@ -169,6 +169,52 @@ io.on("connection", (socket) => {
 
     executeJoin(socket, room, cleanName, emoji || "😄", false);
   });
+  // 1. Handle when someone clicks "I Have"
+socket.on("nihhi-admit", ({ playerName, admitted }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room) return;
+
+    if (!room.gameState.admittedList) room.gameState.admittedList = new Set();
+
+    if (admitted) {
+        room.gameState.admittedList.add(playerName);
+    } else {
+        room.gameState.admittedList.delete(playerName);
+    }
+
+    // Broadcast updated admitted list to everyone
+    io.to(room.id).emit("nihhi-update-admissions", {
+        admittedPlayers: Array.from(room.gameState.admittedList)
+    });
+});
+
+// 2. Handle Host clicking "Next Question"
+socket.on("nihhi-next", ({ questionText, round }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.hostSocketId !== socket.id) return;
+
+    // Deduct fingers for everyone who admitted in the PREVIOUS round
+    if (room.gameState.admittedList) {
+        room.gameState.admittedList.forEach(name => {
+            const player = room.players.find(p => p.name === name);
+            if (player && player.stats.fingers > 0) {
+                player.stats.fingers--;
+            }
+        });
+    }
+
+    // Reset the admitted list for the NEW question
+    room.gameState.admittedList = new Set();
+    room.gameState.round = round;
+    room.gameState.currentTask = { text: questionText };
+
+    // Send the clean state to everyone
+    io.to(room.id).emit("nihhi-question", {
+        text: questionText,
+        round: round
+    });
+    broadcastRoom(room.id); // Syncs fingers/scores
+});
 
   socket.on("resolve-join-request", ({ targetSocketId, approved }) => {
     const room = rooms.get(socket.data.roomId);
@@ -306,19 +352,35 @@ socket.on("pick-task", ({ type, questionText }) => {
       round: room.gameState.round,
     });
   });
-
-  socket.on("end-game", () => {
+socket.on("end-game", () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
+
+    // 1. Capture the final stats BEFORE we reset the room
+    const finalData = room.players.map(p => ({
+        name: p.name,
+        stats: p.stats,
+        emoji: p.emoji
+    }));
+
+    // 2. Trigger the summary screen for everyone with the final scores
+    io.to(room.id).emit("show-summary", { players: finalData });
+    io.to(room.id).emit("game-ended"); // Keep this for backward compatibility
+
+    // 3. Reset the room state back to a clean lobby
     room.gameState.phase = "lobby";
     room.gameState.round = 1;
     room.gameState.currentPlayer = null;
+    room.gameState.admittedList = new Set(); // Reset the NIHHI raised hands
+
     room.players.forEach((p) => {
-      p.stats = { truth: 0, dare: 0, skip: 0 };
+      // Reset normal stats AND reset fingers back to 5 for NIHHI
+      p.stats = { truth: 0, dare: 0, skip: 0, fingers: 5 }; 
       p.eliminated = false;
     });
-    broadcastRoom(socket.data.roomId);
-    io.to(socket.data.roomId).emit("game-ended");
+
+    // 4. Sync the clean lobby state to all clients
+    broadcastRoom(room.id);
   });
 
   socket.on("close-room", () => {
