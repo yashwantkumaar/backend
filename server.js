@@ -260,17 +260,20 @@ io.on("connection", (socket) => {
     }, 2800);
   });
 
-  socket.on("pick-task", ({ type, questionText }) => {
+socket.on("pick-task", ({ type, questionText }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "choice") return;
 
     room.gameState.currentTask = { type, text: questionText };
     room.gameState.phase = "task";
-    broadcastRoom(room.id);
+    
+    // Explicitly broadcast the room to sync state, then emit the task
+    broadcastRoom(room.id); 
+
     io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
-      player: room.gameState.currentPlayer,
+      player: room.gameState.currentPlayer, // Ensure this is sending the picked player
     });
   });
 
@@ -279,11 +282,12 @@ io.on("connection", (socket) => {
     if (!room || room.gameState.phase !== "task") return;
 
     room.gameState.currentTask = { type, text: questionText };
-    broadcastRoom(room.id);
+    
+    // Explicitly send the current player name here too
     io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
-      player: room.gameState.currentPlayer,
+      player: room.gameState.currentPlayer, 
     });
   });
 
