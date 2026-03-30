@@ -174,47 +174,57 @@ socket.on("nihhi-admit", ({ playerName, admitted }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
 
+    // 1. Create the list if it doesn't exist yet
     if (!room.gameState.admittedList) room.gameState.admittedList = new Set();
 
+    // 2. Add or remove the player from the "I Have" list
     if (admitted) {
-        room.gameState.admittedList.add(playerName);
+      room.gameState.admittedList.add(playerName);
     } else {
-        room.gameState.admittedList.delete(playerName);
+      room.gameState.admittedList.delete(playerName);
     }
 
-    // Broadcast updated admitted list to everyone
+    // 3. Broadcast the updated list to EVERYONE in the room as an Array
     io.to(room.id).emit("nihhi-update-admissions", {
-        admittedPlayers: Array.from(room.gameState.admittedList)
+      admittedPlayers: Array.from(room.gameState.admittedList)
     });
-});
+  });
 
 // 2. Handle Host clicking "Next Question"
 socket.on("nihhi-next", ({ questionText, round }) => {
     const room = rooms.get(socket.data.roomId);
+    
+    // SECURITY: Only the Host can trigger the next question
     if (!room || room.hostSocketId !== socket.id) return;
 
-    // Deduct fingers for everyone who admitted in the PREVIOUS round
+    // 1. Deduct fingers for everyone who raised their hand in the PREVIOUS round
     if (room.gameState.admittedList) {
-        room.gameState.admittedList.forEach(name => {
-            const player = room.players.find(p => p.name === name);
-            if (player && player.stats.fingers > 0) {
-                player.stats.fingers--;
-            }
-        });
+      room.gameState.admittedList.forEach(name => {
+        const player = room.players.find(p => p.name === name);
+        if (player) {
+          // Failsafe: Give them 5 fingers if they don't have the variable yet
+          if (player.stats.fingers === undefined) player.stats.fingers = 5;
+          
+          // Deduct 1 finger
+          if (player.stats.fingers > 0) player.stats.fingers--;
+        }
+      });
     }
 
-    // Reset the admitted list for the NEW question
+    // 2. Wipe the "I Have" list clean for the NEW question
     room.gameState.admittedList = new Set();
     room.gameState.round = round;
     room.gameState.currentTask = { text: questionText };
 
-    // Send the clean state to everyone
+    // 3. Send the new question to everyone's screen
     io.to(room.id).emit("nihhi-question", {
-        text: questionText,
-        round: round
+      text: questionText,
+      round: round
     });
-    broadcastRoom(room.id); // Syncs fingers/scores
-});
+    
+    // 4. Sync the new finger counts to everyone's scoreboards
+    broadcastRoom(room.id); 
+  });
 
   socket.on("resolve-join-request", ({ targetSocketId, approved }) => {
     const room = rooms.get(socket.data.roomId);
