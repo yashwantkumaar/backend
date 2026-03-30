@@ -170,21 +170,22 @@ io.on("connection", (socket) => {
     executeJoin(socket, room, cleanName, emoji || "😄", false);
   });
   // 1. Handle when someone clicks "I Have"
-socket.on("nihhi-admit", ({ playerName, admitted }) => {
+socket.on("nihhi-admit", ({ admitted }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
 
-    // 1. Create the list if it doesn't exist yet
+    // 🔥 SECURITY: Force the server to use the actual socket's name, not the client payload!
+    const realPlayerName = socket.data.playerName;
+
     if (!room.gameState.admittedList) room.gameState.admittedList = new Set();
 
-    // 2. Add or remove the player from the "I Have" list
     if (admitted) {
-      room.gameState.admittedList.add(playerName);
+      room.gameState.admittedList.add(realPlayerName);
     } else {
-      room.gameState.admittedList.delete(playerName);
+      room.gameState.admittedList.delete(realPlayerName);
     }
 
-    // 3. Broadcast the updated list to EVERYONE in the room as an Array
+    // Broadcast the exact list of who raised their hands to EVERYONE
     io.to(room.id).emit("nihhi-update-admissions", {
       admittedPlayers: Array.from(room.gameState.admittedList)
     });
