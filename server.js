@@ -52,7 +52,8 @@ function broadcastRoom(roomId) {
 io.on("connection", (socket) => {
   console.log(`[+] ${socket.id} connected`);
 
-  socket.on("create-room", ({ playerName, emoji, difficulty, gameMode }) => {
+  // --- ROOM CREATION (Updated with spicyCategory) ---
+  socket.on("create-room", ({ playerName, emoji, difficulty, gameMode, spicyCategory }) => {
     if (!playerName || playerName.trim().length === 0)
       return socket.emit("error", { message: "Player name is required." });
     
@@ -73,12 +74,13 @@ io.on("connection", (socket) => {
           isHost: true,
           eliminated: false,
           offline: false,
-          stats: { truth: 0, dare: 0, skip: 0 },
+          stats: { truth: 0, dare: 0, skip: 0, fingers: 5 },
         },
       ],
       settings: {
         difficulty: difficulty || "medium",
         gameMode: gameMode || "tod",
+        spicyCategory: spicyCategory || null // 🌶️ Stores 'couples' or 'friends'
       },
       gameState: {
         phase: "lobby",
@@ -86,6 +88,7 @@ io.on("connection", (socket) => {
         currentPlayer: null,
         currentTask: null,
         spinning: false,
+        admittedList: []
       },
       chat: [],
     };
@@ -97,24 +100,23 @@ io.on("connection", (socket) => {
   });
 
   /* ══════════════════════════════════════════════════════════
-     💎 GEM MODE LISTENERS (Fixed State Sync)
+      💎 GEM MODE LISTENERS
      ══════════════════════════════════════════════════════════ */
   
   socket.on('spawn-gem', ({ x, y }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (room) io.to(room.id).emit('spawn-gem', { x, y });
+    const roomId = socket.data.roomId;
+    if (roomId) io.to(roomId).emit('spawn-gem', { x, y });
   });
 
   socket.on('claim-gem', ({ playerName }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (room) io.to(room.id).emit('gem-claimed', { playerName });
+    const roomId = socket.data.roomId;
+    if (roomId) io.to(roomId).emit('gem-claimed', { playerName });
   });
 
   socket.on('gem-skip', ({ playerName }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "task") return;
 
-    // 🚀 CRITICAL FIX: Update server state so the game doesn't freeze!
     room.gameState.round++;
     room.gameState.phase = "playing";
     room.gameState.currentTask = null;
@@ -124,7 +126,7 @@ io.on("connection", (socket) => {
   });
 
   /* ══════════════════════════════════════════════════════════
-     ROOM & GAMEPLAY LISTENERS
+      ROOM & GAMEPLAY LISTENERS
      ══════════════════════════════════════════════════════════ */
 
   socket.on("join-room", ({ roomId, playerName, emoji }) => {
@@ -169,61 +171,46 @@ io.on("connection", (socket) => {
 
     executeJoin(socket, room, cleanName, emoji || "😄", false);
   });
-  // 1. Handle when someone clicks "I Have"
-socket.on("nihhi-admit", ({ admitted }) => {
+
+  // --- NIHHI ADMIT ---
+  socket.on("nihhi-admit", ({ admitted }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
 
-    // 🔥 SECURITY: Force the server to use the actual socket's name, not the client payload!
     const realPlayerName = socket.data.playerName;
-
-    if (!room.gameState.admittedList) room.gameState.admittedList = new Set();
+    if (!room.gameState.admittedSet) room.gameState.admittedSet = new Set();
 
     if (admitted) {
-      room.gameState.admittedList.add(realPlayerName);
+      room.gameState.admittedSet.add(realPlayerName);
     } else {
-      room.gameState.admittedList.delete(realPlayerName);
+      room.gameState.admittedSet.delete(realPlayerName);
     }
 
-    // Broadcast the exact list of who raised their hands to EVERYONE
     io.to(room.id).emit("nihhi-update-admissions", {
-      admittedPlayers: Array.from(room.gameState.admittedList)
+      admittedPlayers: Array.from(room.gameState.admittedSet)
     });
   });
 
-// 2. Handle Host clicking "Next Question"
-socket.on("nihhi-next", ({ questionText, round }) => {
+  // --- NIHHI NEXT ---
+  socket.on("nihhi-next", ({ questionText, round }) => {
     const room = rooms.get(socket.data.roomId);
-    
-    // SECURITY: Only the Host can trigger the next question
     if (!room || room.hostSocketId !== socket.id) return;
 
-    // 1. Deduct fingers for everyone who raised their hand in the PREVIOUS round
-    if (room.gameState.admittedList) {
-      room.gameState.admittedList.forEach(name => {
+    if (room.gameState.admittedSet) {
+      room.gameState.admittedSet.forEach(name => {
         const player = room.players.find(p => p.name === name);
         if (player) {
-          // Failsafe: Give them 5 fingers if they don't have the variable yet
           if (player.stats.fingers === undefined) player.stats.fingers = 5;
-          
-          // Deduct 1 finger
           if (player.stats.fingers > 0) player.stats.fingers--;
         }
       });
     }
 
-    // 2. Wipe the "I Have" list clean for the NEW question
-    room.gameState.admittedList = new Set();
+    room.gameState.admittedSet = new Set();
     room.gameState.round = round;
     room.gameState.currentTask = { text: questionText };
 
-    // 3. Send the new question to everyone's screen
-    io.to(room.id).emit("nihhi-question", {
-      text: questionText,
-      round: round
-    });
-    
-    // 4. Sync the new finger counts to everyone's scoreboards
+    io.to(room.id).emit("nihhi-question", { text: questionText, round: round });
     broadcastRoom(room.id); 
   });
 
@@ -256,7 +243,7 @@ socket.on("nihhi-next", ({ questionText, round }) => {
         isHost: false,
         eliminated: false,
         offline: false,
-        stats: { truth: 0, dare: 0, skip: 0 },
+        stats: { truth: 0, dare: 0, skip: 0, fingers: 5 },
       });
     }
 
@@ -269,11 +256,15 @@ socket.on("nihhi-next", ({ questionText, round }) => {
     broadcastRoom(room.id);
   }
 
-  socket.on("update-settings", ({ difficulty, gameMode }) => {
+  // --- UPDATED SETTINGS (Now handles spicyCategory) ---
+  socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
+    
     room.settings.difficulty = difficulty || room.settings.difficulty;
     room.settings.gameMode = gameMode || room.settings.gameMode;
+    room.settings.spicyCategory = spicyCategory || room.settings.spicyCategory;
+    
     broadcastRoom(socket.data.roomId);
   });
 
@@ -317,20 +308,19 @@ socket.on("nihhi-next", ({ questionText, round }) => {
     }, 2800);
   });
 
-socket.on("pick-task", ({ type, questionText }) => {
+  socket.on("pick-task", ({ type, questionText }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "choice") return;
 
     room.gameState.currentTask = { type, text: questionText };
     room.gameState.phase = "task";
     
-    // Explicitly broadcast the room to sync state, then emit the task
     broadcastRoom(room.id); 
 
     io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
-      player: room.gameState.currentPlayer, // Ensure this is sending the picked player
+      player: room.gameState.currentPlayer, 
     });
   });
 
@@ -340,7 +330,6 @@ socket.on("pick-task", ({ type, questionText }) => {
 
     room.gameState.currentTask = { type, text: questionText };
     
-    // Explicitly send the current player name here too
     io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
@@ -363,34 +352,30 @@ socket.on("pick-task", ({ type, questionText }) => {
       round: room.gameState.round,
     });
   });
-socket.on("end-game", () => {
+
+  socket.on("end-game", () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
 
-    // 1. Capture the final stats BEFORE we reset the room
     const finalData = room.players.map(p => ({
         name: p.name,
         stats: p.stats,
         emoji: p.emoji
     }));
 
-    // 2. Trigger the summary screen for everyone with the final scores
     io.to(room.id).emit("show-summary", { players: finalData });
-    io.to(room.id).emit("game-ended"); // Keep this for backward compatibility
+    io.to(room.id).emit("game-ended"); 
 
-    // 3. Reset the room state back to a clean lobby
     room.gameState.phase = "lobby";
     room.gameState.round = 1;
     room.gameState.currentPlayer = null;
-    room.gameState.admittedList = new Set(); // Reset the NIHHI raised hands
+    room.gameState.admittedSet = new Set(); 
 
     room.players.forEach((p) => {
-      // Reset normal stats AND reset fingers back to 5 for NIHHI
       p.stats = { truth: 0, dare: 0, skip: 0, fingers: 5 }; 
       p.eliminated = false;
     });
 
-    // 4. Sync the clean lobby state to all clients
     broadcastRoom(room.id);
   });
 
