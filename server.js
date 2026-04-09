@@ -98,6 +98,18 @@ io.on("connection", (socket) => {
     socket.data.playerName = playerName.trim();
     socket.emit("room-created", { roomId, room: getPublicRoom(room) });
   });
+  socket.on("room-update", (room) => {
+    // ... your other update logic ...
+
+    // Sync the local variables with the server's data
+    difficulty = room.settings.difficulty;
+    window.spicyCategory = room.settings.spicyCategory;
+
+    // Refresh the Lobby UI buttons to match the server
+    if (difficulty) {
+        updateLobbyUI(difficulty);
+    }
+});
 
   /* ══════════════════════════════════════════════════════════
       💎 GEM MODE LISTENERS
