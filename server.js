@@ -99,17 +99,34 @@ settings: {
     socket.data.playerName = playerName.trim();
     socket.emit("room-created", { roomId, room: getPublicRoom(room) });
   });
-  socket.on("room-update", (room) => {
-    // ... your other update logic ...
-
-    // Sync the local variables with the server's data
+socket.on("room-update", (room) => {
+    // 1. Sync Guest's local variables with Host's settings
     difficulty = room.settings.difficulty;
     window.spicyCategory = room.settings.spicyCategory;
+    
+    // 2. Update button highlights (Easy/Medium/Spicy)
+    // Assuming you have an update function, or use this:
+    const allBtns = document.querySelectorAll('.online-diff-btn, .lobby-diff-btn');
+    allBtns.forEach(b => b.classList.remove('sel-easy', 'sel-medium', 'sel-spicy', 'active-medium'));
 
-    // Refresh the Lobby UI buttons to match the server
-    if (difficulty) {
-        updateLobbyUI(difficulty);
+    // 3. Update the Spicy Button text for the Guest
+    const spicyBtn = document.getElementById("odb-spicy") || document.getElementById("ldb-spicy");
+    const easyBtn = document.getElementById("odb-easy") || document.getElementById("ldb-easy");
+    const medBtn = document.getElementById("odb-medium") || document.getElementById("ldb-medium");
+
+    if (difficulty === 'spicy') {
+        if (spicyBtn) {
+            spicyBtn.classList.add('sel-spicy');
+            const modeName = window.spicyCategory === 'couples' ? 'Couples' : 'Friends';
+            spicyBtn.innerHTML = `🌶️ Spicy (${modeName})`;
+        }
+    } else if (difficulty === 'easy') {
+        if (easyBtn) easyBtn.classList.add('sel-easy');
+    } else {
+        if (medBtn) medBtn.classList.add('sel-medium');
     }
+
+    // (Continue with your other room update logic like rendering players...)
 });
 
   /* ══════════════════════════════════════════════════════════
@@ -358,6 +375,44 @@ socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
       player: room.gameState.currentPlayer, 
     });
   });
+socket.on("task-assigned", ({ type, text, player }) => {
+    // 1. Update global variables so they match what was picked
+    currentTaskType = type;
+    currentTaskText = text;
+    currentPlayer = player;
+
+    // 2. Hide the choice buttons (Truth/Dare buttons)
+    const choiceBtns = document.getElementById("choice-btns");
+    if (choiceBtns) choiceBtns.style.display = "none";
+
+    // 3. Build the Task Card HTML
+    const numBadge = `<div class="task-num-badge">${type === "truth" ? "💬" : "🔥"} ${type.toUpperCase()} · ROUND ${round}</div>`;
+    
+    // Add drink mode hint if enabled
+    const drinkHtml = drinkMode ? `<div class="drink-hint">🍺 Take a sip if you nail it!</div>` : "";
+
+    // 4. Inject the card into the UI
+    const taskArea = document.getElementById("task-area");
+    if (taskArea) {
+        taskArea.innerHTML = `
+            <div class="task-card">
+                ${numBadge}
+                <div class="task-text">${text}</div>
+                ${drinkHtml}
+                <div class="task-actions">
+                    <p style="font-size: 12px; color: rgba(255,255,255,0.4);">Waiting for ${player} to complete...</p>
+                </div>
+            </div>
+        `;
+    }
+
+    // 5. Update the player name on the modal
+    const modalPlayer = document.getElementById("modal-player");
+    if (modalPlayer) modalPlayer.textContent = player;
+
+    // 6. Start the local timer so everyone sees the countdown
+    if (typeof startTimer === "function") startTimer(type);
+});
 
   socket.on("complete-task", ({ type }) => {
     const room = rooms.get(socket.data.roomId);
