@@ -77,11 +77,12 @@ io.on("connection", (socket) => {
           stats: { truth: 0, dare: 0, skip: 0, fingers: 5 },
         },
       ],
-      settings: {
-        difficulty: difficulty || "medium",
-        gameMode: gameMode || "tod",
-        spicyCategory: spicyCategory || null // 🌶️ Stores 'couples' or 'friends'
-      },
+      // Inside socket.on("create-room", ...)
+settings: {
+    difficulty: difficulty || "medium",
+    gameMode: gameMode || "tod",
+    spicyCategory: null // Start as null until Spicy is picked
+},
       gameState: {
         phase: "lobby",
         round: 1,
@@ -269,16 +270,25 @@ io.on("connection", (socket) => {
   }
 
   // --- UPDATED SETTINGS (Now handles spicyCategory) ---
-  socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
+ // --- server.js ---
+
+socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
     const room = rooms.get(socket.data.roomId);
-    if (!room || room.hostSocketId !== socket.id) return;
     
+    // Safety: Only host can change settings
+    if (!room || room.hostSocketId !== socket.id) return;
+
+    // 1. Update the settings object in the server's memory
     room.settings.difficulty = difficulty || room.settings.difficulty;
     room.settings.gameMode = gameMode || room.settings.gameMode;
-    room.settings.spicyCategory = spicyCategory || room.settings.spicyCategory;
     
+    // 🌶️ IMPORTANT: Save whether it is 'couples' or 'friends'
+    room.settings.spicyCategory = spicyCategory || room.settings.spicyCategory;
+
+    // 📡 2. Tell EVERYONE in the room that settings changed
+    // This triggers the UI update on the guests' phones
     broadcastRoom(socket.data.roomId);
-  });
+});
 
   socket.on("start-game", () => {
     const room = rooms.get(socket.data.roomId);
