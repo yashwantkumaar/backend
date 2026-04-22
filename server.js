@@ -347,21 +347,23 @@ socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
     }, 2800);
   });
 
-  socket.on("pick-task", ({ type, questionText }) => {
+
+
+  // Inside server.js
+socket.on("pick-task", ({ type, questionText }) => {
     const room = rooms.get(socket.data.roomId);
-    if (!room || room.gameState.phase !== "choice") return;
+    if (!room) return;
 
-    room.gameState.currentTask = { type, text: questionText };
     room.gameState.phase = "task";
-    
-    broadcastRoom(room.id); 
+    room.gameState.currentTask = { type, text: questionText };
 
+    // Broadcast to EVERYONE in the room including the sender (host)
     io.to(room.id).emit("task-assigned", {
-      type,
-      text: questionText,
-      player: room.gameState.currentPlayer, 
+        type: type,
+        text: questionText,
+        player: room.gameState.currentPlayer
     });
-  });
+});
 
   socket.on("new-question", ({ type, questionText }) => {
     const room = rooms.get(socket.data.roomId);
@@ -376,42 +378,64 @@ socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
     });
   });
 socket.on("task-assigned", ({ type, text, player }) => {
-    // 1. Update global variables so they match what was picked
+    // 1. Update global variables
     currentTaskType = type;
     currentTaskText = text;
-    currentPlayer = player;
+    // Note: Make sure 'currentPlayer' is correctly synced here
+    // currentPlayer = player; 
 
-    // 2. Hide the choice buttons (Truth/Dare buttons)
+    // 2. THE FIX: Show the modal and hide the initial choice buttons
+    const choiceModal = document.getElementById("choice-modal");
+    if (choiceModal) {
+        choiceModal.style.display = "flex"; // Force the modal to show for Host
+    }
+
     const choiceBtns = document.getElementById("choice-btns");
-    if (choiceBtns) choiceBtns.style.display = "none";
+    if (choiceBtns) {
+        choiceBtns.style.display = "none"; // Hide Truth/Dare selection
+    }
 
-    // 3. Build the Task Card HTML
-    const numBadge = `<div class="task-num-badge">${type === "truth" ? "💬" : "🔥"} ${type.toUpperCase()} · ROUND ${round}</div>`;
-    
-    // Add drink mode hint if enabled
+    // 3. Build the Task Card HTML with Spicy Category support
+    const displayDiff = (difficulty === "spicy" && window.spicyCategory) 
+        ? (window.spicyCategory === "couples" ? "👩‍❤️‍👨 COUPLES" : "👯 FRIENDS")
+        : type.toUpperCase();
+
+    const numBadge = `<div class="task-num-badge">${type === "truth" ? "💬" : "🔥"} ${displayDiff} · ROUND ${round}</div>`;
     const drinkHtml = drinkMode ? `<div class="drink-hint">🍺 Take a sip if you nail it!</div>` : "";
 
     // 4. Inject the card into the UI
     const taskArea = document.getElementById("task-area");
     if (taskArea) {
+        // We only show the "Done" button to the person whose turn it is
+        const isMyTurn = (player === myPlayerName);
+        
         taskArea.innerHTML = `
             <div class="task-card">
                 ${numBadge}
                 <div class="task-text">${text}</div>
                 ${drinkHtml}
                 <div class="task-actions">
-                    <p style="font-size: 12px; color: rgba(255,255,255,0.4);">Waiting for ${player} to complete...</p>
+                    ${isMyTurn ? 
+                        `<button class="btn-done" onclick="completeTask('${type}')">✓ Done!</button>` : 
+                        `<p style="font-size: 14px; color: rgba(255,255,255,0.6); margin-top:10px;">
+                            ⏳ Waiting for <b>${player}</b> to complete...
+                         </p>`
+                    }
                 </div>
             </div>
         `;
     }
 
-    // 5. Update the player name on the modal
+    // 5. Update UI text
     const modalPlayer = document.getElementById("modal-player");
     if (modalPlayer) modalPlayer.textContent = player;
 
-    // 6. Start the local timer so everyone sees the countdown
+    // 6. Start the local timer and cleanup animations
     if (typeof startTimer === "function") startTimer(type);
+    
+    // 🔥 Cleanup: If the bottle was spinning, stop the animation
+    const bottle = document.getElementById("bottle");
+    if (bottle) bottle.style.transition = "none";
 });
 
   socket.on("complete-task", ({ type }) => {
