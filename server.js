@@ -348,6 +348,50 @@ socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
   });
 
 
+  socket.on("spin-result", ({ player, round }) => {
+    const bw = document.querySelector(".bottle-wrap");
+    if (bw) bw.classList.remove("spinning");
+    const gr = document.getElementById("glow-ring");
+    if (gr) gr.classList.remove("active");
+
+    currentPlayer = player;
+    document.getElementById("round-badge").textContent = "Round " + (onlineRoom?.gameState?.round || round);
+    document.getElementById("spin-counter").textContent = "Round " + round + " · " + player.toUpperCase() + "'s turn";
+    showTurnBanner(player);
+
+    const canChoose = (player === myPlayerName || isHost);
+
+    if (canChoose) {
+        // Host / current player gets the Truth or Dare choice buttons
+        openModal(player);
+    } else {
+        // Every OTHER player sees the modal in "watching" mode — NO choice buttons
+        const modalPlayerEl = document.getElementById("modal-player");
+        if (modalPlayerEl) {
+            modalPlayerEl.textContent = player.toUpperCase();
+            modalPlayerEl.className = "modal-player" + (isSpecialName(player) ? " gold-modal" : "");
+        }
+        const modalSubtitle = document.getElementById("modal-subtitle");
+        if (modalSubtitle) modalSubtitle.textContent = "👀 Picking their fate...";
+
+        const taskArea = document.getElementById("task-area");
+        if (taskArea) {
+            taskArea.innerHTML = `
+                <div style="padding:28px 20px;text-align:center;color:rgba(255,255,255,0.45);font-size:14px;">
+                    <div style="font-size:40px;margin-bottom:14px;animation:iconBounce 1.2s ease-in-out infinite;">🎯</div>
+                    <div>Waiting for <strong style="color:rgba(255,255,255,0.8);">${player}</strong> to choose...</div>
+                </div>`;
+        }
+
+        const choiceBtns = document.getElementById("choice-btns");
+        if (choiceBtns) choiceBtns.style.display = "none";
+
+        const modal = document.getElementById("choice-modal");
+        if (modal) modal.classList.add("open");
+    }
+});
+
+
 
   // Inside server.js
 socket.on("pick-task", ({ type, questionText }) => {
@@ -378,53 +422,52 @@ socket.on("pick-task", ({ type, questionText }) => {
     });
   });
 socket.on("task-assigned", ({ type, text, player }) => {
-    // 1. Update global variables
-    currentTaskType = type;
-    currentTaskText = text;
-    // Note: Make sure 'currentPlayer' is correctly synced here
-    // currentPlayer = player; 
+    hideWaitingOverlay();
 
-    // 2. THE FIX: Show the modal and hide the initial choice buttons
-    const choiceModal = document.getElementById("choice-modal");
-    if (choiceModal) {
-        choiceModal.style.display = "flex"; // Force the modal to show for Host
+    const canAct = (player === myPlayerName || isHost);
+
+    // ── 1. Update modal header for EVERYONE ──
+    const modalPlayerEl = document.getElementById("modal-player");
+    if (modalPlayerEl) {
+        modalPlayerEl.textContent = player.toUpperCase();
+        modalPlayerEl.className = "modal-player" + (isSpecialName(player) ? " gold-modal" : "");
     }
 
+    // ── 2. Update subtitle so spectators never see "Choose your fate" ──
+    const modalSubtitle = document.getElementById("modal-subtitle");
+    if (modalSubtitle) {
+        modalSubtitle.textContent = canAct
+            ? "Complete your challenge! 🔥"
+            : `👀 ${player} is doing a ${type.toUpperCase()}`;
+    }
+
+    // ── 3. Hide choice buttons for EVERYONE ──
     const choiceBtns = document.getElementById("choice-btns");
-    if (choiceBtns) {
-        choiceBtns.style.display = "none"; // Hide Truth/Dare selection
-    }
+    if (choiceBtns) choiceBtns.style.display = "none";
 
-    // 3. Build the Task Card HTML with Spicy Category support
-    const displayDiff = (difficulty === "spicy" && window.spicyCategory) 
-        ? (window.spicyCategory === "couples" ? "👩‍❤️‍👨 COUPLES" : "👯 FRIENDS")
-        : type.toUpperCase();
-
-    const numBadge = `<div class="task-num-badge">${type === "truth" ? "💬" : "🔥"} ${displayDiff} · ROUND ${round}</div>`;
-    const drinkHtml = drinkMode ? `<div class="drink-hint">🍺 Take a sip if you nail it!</div>` : "";
-
-    // 4. Inject the card into the UI
+    // ── 4. Build the task card for EVERYONE ──
     const taskArea = document.getElementById("task-area");
     if (taskArea) {
-        // We only show the "Done" button to the person whose turn it is
-        const isMyTurn = (player === myPlayerName);
-        
-        taskArea.innerHTML = `
-            <div class="task-card">
-                ${numBadge}
-                <div class="task-text">${text}</div>
-                ${drinkHtml}
-                <div class="task-actions">
-                    ${isMyTurn ? 
-                        `<button class="btn-done" onclick="completeTask('${type}')">✓ Done!</button>` : 
-                        `<p style="font-size: 14px; color: rgba(255,255,255,0.6); margin-top:10px;">
-                            ⏳ Waiting for <b>${player}</b> to complete...
-                         </p>`
-                    }
-                </div>
-            </div>
-        `;
+        taskArea.innerHTML = buildOnlineTaskCard(type, text, player);
     }
+
+    // ── 5. Make sure modal is open for EVERYONE ──
+    const modal = document.getElementById("choice-modal");
+    if (modal) modal.classList.add("open");
+
+    // ── 6. Set button permissions (only active player / host can press Done/Skip) ──
+    document.querySelectorAll(".btn-done, .btn-skip, .btn-switch-dare").forEach((btn) => {
+        btn.disabled = !canAct;
+        btn.style.opacity = canAct ? "1" : "0.45";
+        btn.style.pointerEvents = canAct ? "auto" : "none";
+        // Add visual label so spectators understand why buttons are greyed
+        if (!canAct && btn.classList.contains("btn-done")) {
+            btn.textContent = "⏳ Waiting...";
+        }
+    });
+
+    if (typeof startTimer === "function") startTimer(type);
+});
 
     // 5. Update UI text
     const modalPlayer = document.getElementById("modal-player");
@@ -554,7 +597,6 @@ socket.on("task-assigned", ({ type, text, player }) => {
       }
     }
   });
-});
 
 app.get("/", (req, res) => res.json({ status: "Online 🔥" }));
 const PORT = process.env.PORT || 3001;
