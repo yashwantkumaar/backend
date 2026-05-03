@@ -12,7 +12,7 @@ const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: "*", 
+    origin: "*",
     methods: ["GET", "POST"],
   },
   pingTimeout: 30000,
@@ -52,11 +52,11 @@ function broadcastRoom(roomId) {
 io.on("connection", (socket) => {
   console.log(`[+] ${socket.id} connected`);
 
-  // --- ROOM CREATION (Updated with spicyCategory) ---
+  // ── CREATE ROOM ───────────────────────────────────────────
   socket.on("create-room", ({ playerName, emoji, difficulty, gameMode, spicyCategory }) => {
     if (!playerName || playerName.trim().length === 0)
       return socket.emit("error", { message: "Player name is required." });
-    
+
     let roomId;
     do {
       roomId = generateRoomId();
@@ -65,7 +65,7 @@ io.on("connection", (socket) => {
     const room = {
       id: roomId,
       hostSocketId: socket.id,
-      pendingJoins: {}, 
+      pendingJoins: {},
       players: [
         {
           socketId: socket.id,
@@ -77,88 +77,30 @@ io.on("connection", (socket) => {
           stats: { truth: 0, dare: 0, skip: 0, fingers: 5 },
         },
       ],
-      // Inside socket.on("create-room", ...)
-settings: {
-    difficulty: difficulty || "medium",
-    gameMode: gameMode || "tod",
-    spicyCategory: null // Start as null until Spicy is picked
-},
+      settings: {
+        difficulty: difficulty || "medium",
+        gameMode: gameMode || "tod",
+        spicyCategory: spicyCategory || null,
+      },
       gameState: {
         phase: "lobby",
         round: 1,
         currentPlayer: null,
         currentTask: null,
         spinning: false,
-        admittedList: []
+        admittedSet: new Set(),
       },
       chat: [],
     };
+
     rooms.set(roomId, room);
     socket.join(roomId);
     socket.data.roomId = roomId;
     socket.data.playerName = playerName.trim();
     socket.emit("room-created", { roomId, room: getPublicRoom(room) });
   });
-socket.on("room-update", (room) => {
-    // 1. Sync Guest's local variables with Host's settings
-    difficulty = room.settings.difficulty;
-    window.spicyCategory = room.settings.spicyCategory;
-    
-    // 2. Update button highlights (Easy/Medium/Spicy)
-    // Assuming you have an update function, or use this:
-    const allBtns = document.querySelectorAll('.online-diff-btn, .lobby-diff-btn');
-    allBtns.forEach(b => b.classList.remove('sel-easy', 'sel-medium', 'sel-spicy', 'active-medium'));
 
-    // 3. Update the Spicy Button text for the Guest
-    const spicyBtn = document.getElementById("odb-spicy") || document.getElementById("ldb-spicy");
-    const easyBtn = document.getElementById("odb-easy") || document.getElementById("ldb-easy");
-    const medBtn = document.getElementById("odb-medium") || document.getElementById("ldb-medium");
-
-    if (difficulty === 'spicy') {
-        if (spicyBtn) {
-            spicyBtn.classList.add('sel-spicy');
-            const modeName = window.spicyCategory === 'couples' ? 'Couples' : 'Friends';
-            spicyBtn.innerHTML = `🌶️ Spicy (${modeName})`;
-        }
-    } else if (difficulty === 'easy') {
-        if (easyBtn) easyBtn.classList.add('sel-easy');
-    } else {
-        if (medBtn) medBtn.classList.add('sel-medium');
-    }
-
-    // (Continue with your other room update logic like rendering players...)
-});
-
-  /* ══════════════════════════════════════════════════════════
-      💎 GEM MODE LISTENERS
-     ══════════════════════════════════════════════════════════ */
-  
-  socket.on('spawn-gem', ({ x, y }) => {
-    const roomId = socket.data.roomId;
-    if (roomId) io.to(roomId).emit('spawn-gem', { x, y });
-  });
-
-  socket.on('claim-gem', ({ playerName }) => {
-    const roomId = socket.data.roomId;
-    if (roomId) io.to(roomId).emit('gem-claimed', { playerName });
-  });
-
-  socket.on('gem-skip', ({ playerName }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.gameState.phase !== "task") return;
-
-    room.gameState.round++;
-    room.gameState.phase = "playing";
-    room.gameState.currentTask = null;
-    
-    broadcastRoom(room.id);
-    io.to(room.id).emit('gem-skip-used', { playerName, round: room.gameState.round });
-  });
-
-  /* ══════════════════════════════════════════════════════════
-      ROOM & GAMEPLAY LISTENERS
-     ══════════════════════════════════════════════════════════ */
-
+  // ── JOIN ROOM ─────────────────────────────────────────────
   socket.on("join-room", ({ roomId, playerName, emoji }) => {
     const id = (roomId || "").toUpperCase().trim();
     const room = rooms.get(id);
@@ -166,7 +108,7 @@ socket.on("room-update", (room) => {
 
     const cleanName = playerName.trim().substring(0, 16);
     const existingPlayer = room.players.find(
-      (p) => p.name.toLowerCase() === cleanName.toLowerCase(),
+      (p) => p.name.toLowerCase() === cleanName.toLowerCase()
     );
 
     let joinType = "new";
@@ -180,7 +122,6 @@ socket.on("room-update", (room) => {
     } else {
       if (room.players.length >= 8)
         return socket.emit("error", { message: "Room is full! Max 8 players." });
-      
       if (room.gameState.phase !== "lobby") {
         joinType = "late";
       }
@@ -189,7 +130,6 @@ socket.on("room-update", (room) => {
     if (joinType === "rejoin" || joinType === "late") {
       if (!room.pendingJoins) room.pendingJoins = {};
       room.pendingJoins[socket.id] = { playerName: cleanName, emoji: emoji || "😄", type: joinType };
-
       socket.emit("waiting-for-approval");
       io.to(room.hostSocketId).emit("join-request", {
         targetSocketId: socket.id,
@@ -202,51 +142,10 @@ socket.on("room-update", (room) => {
     executeJoin(socket, room, cleanName, emoji || "😄", false);
   });
 
-  // --- NIHHI ADMIT ---
-  socket.on("nihhi-admit", ({ admitted }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room) return;
-
-    const realPlayerName = socket.data.playerName;
-    if (!room.gameState.admittedSet) room.gameState.admittedSet = new Set();
-
-    if (admitted) {
-      room.gameState.admittedSet.add(realPlayerName);
-    } else {
-      room.gameState.admittedSet.delete(realPlayerName);
-    }
-
-    io.to(room.id).emit("nihhi-update-admissions", {
-      admittedPlayers: Array.from(room.gameState.admittedSet)
-    });
-  });
-
-  // --- NIHHI NEXT ---
-  socket.on("nihhi-next", ({ questionText, round }) => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.hostSocketId !== socket.id) return;
-
-    if (room.gameState.admittedSet) {
-      room.gameState.admittedSet.forEach(name => {
-        const player = room.players.find(p => p.name === name);
-        if (player) {
-          if (player.stats.fingers === undefined) player.stats.fingers = 5;
-          if (player.stats.fingers > 0) player.stats.fingers--;
-        }
-      });
-    }
-
-    room.gameState.admittedSet = new Set();
-    room.gameState.round = round;
-    room.gameState.currentTask = { text: questionText };
-
-    io.to(room.id).emit("nihhi-question", { text: questionText, round: round });
-    broadcastRoom(room.id); 
-  });
-
+  // ── RESOLVE JOIN REQUEST (host approves/denies) ───────────
   socket.on("resolve-join-request", ({ targetSocketId, approved }) => {
     const room = rooms.get(socket.data.roomId);
-    if (!room || room.hostSocketId !== socket.id || !room.pendingJoins || !room.pendingJoins[targetSocketId]) return;
+    if (!room || room.hostSocketId !== socket.id || !room.pendingJoins?.[targetSocketId]) return;
 
     const requestData = room.pendingJoins[targetSocketId];
     delete room.pendingJoins[targetSocketId];
@@ -280,42 +179,37 @@ socket.on("room-update", (room) => {
     targetSocket.join(room.id);
     targetSocket.data.roomId = room.id;
     targetSocket.data.playerName = playerName;
-    
+
     targetSocket.emit("room-joined", { roomId: room.id, room: getPublicRoom(room) });
     io.to(room.id).emit("player-joined", { playerName, emoji, rejoined: isRejoin });
     broadcastRoom(room.id);
   }
 
-  // --- UPDATED SETTINGS (Now handles spicyCategory) ---
- // --- server.js ---
-
-socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
+  // ── UPDATE SETTINGS ───────────────────────────────────────
+  socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
     const room = rooms.get(socket.data.roomId);
-    
-    // Safety: Only host can change settings
     if (!room || room.hostSocketId !== socket.id) return;
 
-    // 1. Update the settings object in the server's memory
-    room.settings.difficulty = difficulty || room.settings.difficulty;
-    room.settings.gameMode = gameMode || room.settings.gameMode;
-    
-    // 🌶️ IMPORTANT: Save whether it is 'couples' or 'friends'
-    room.settings.spicyCategory = spicyCategory || room.settings.spicyCategory;
+    if (difficulty) room.settings.difficulty = difficulty;
+    if (gameMode) room.settings.gameMode = gameMode;
+    // Allow null to clear spicyCategory when switching away from spicy
+    if (spicyCategory !== undefined) room.settings.spicyCategory = spicyCategory;
 
-    // 📡 2. Tell EVERYONE in the room that settings changed
-    // This triggers the UI update on the guests' phones
     broadcastRoom(socket.data.roomId);
-});
+  });
 
+  // ── START GAME ────────────────────────────────────────────
   socket.on("start-game", () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
+
     room.gameState.phase = "playing";
     room.gameState.round = 1;
     broadcastRoom(socket.data.roomId);
     io.to(socket.data.roomId).emit("game-started", { settings: room.settings });
   });
 
+  // ── SPIN BOTTLE ───────────────────────────────────────────
   socket.on("spin", () => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "playing" || room.gameState.spinning) return;
@@ -347,140 +241,40 @@ socket.on("update-settings", ({ difficulty, gameMode, spicyCategory }) => {
     }, 2800);
   });
 
-
-  socket.on("spin-result", ({ player, round }) => {
-    const bw = document.querySelector(".bottle-wrap");
-    if (bw) bw.classList.remove("spinning");
-    const gr = document.getElementById("glow-ring");
-    if (gr) gr.classList.remove("active");
-
-    currentPlayer = player;
-    document.getElementById("round-badge").textContent = "Round " + (onlineRoom?.gameState?.round || round);
-    document.getElementById("spin-counter").textContent = "Round " + round + " · " + player.toUpperCase() + "'s turn";
-    showTurnBanner(player);
-
-    const canChoose = (player === myPlayerName || isHost);
-
-    if (canChoose) {
-        // Host / current player gets the Truth or Dare choice buttons
-        openModal(player);
-    } else {
-        // Every OTHER player sees the modal in "watching" mode — NO choice buttons
-        const modalPlayerEl = document.getElementById("modal-player");
-        if (modalPlayerEl) {
-            modalPlayerEl.textContent = player.toUpperCase();
-            modalPlayerEl.className = "modal-player" + (isSpecialName(player) ? " gold-modal" : "");
-        }
-        const modalSubtitle = document.getElementById("modal-subtitle");
-        if (modalSubtitle) modalSubtitle.textContent = "👀 Picking their fate...";
-
-        const taskArea = document.getElementById("task-area");
-        if (taskArea) {
-            taskArea.innerHTML = `
-                <div style="padding:28px 20px;text-align:center;color:rgba(255,255,255,0.45);font-size:14px;">
-                    <div style="font-size:40px;margin-bottom:14px;animation:iconBounce 1.2s ease-in-out infinite;">🎯</div>
-                    <div>Waiting for <strong style="color:rgba(255,255,255,0.8);">${player}</strong> to choose...</div>
-                </div>`;
-        }
-
-        const choiceBtns = document.getElementById("choice-btns");
-        if (choiceBtns) choiceBtns.style.display = "none";
-
-        const modal = document.getElementById("choice-modal");
-        if (modal) modal.classList.add("open");
-    }
-});
-
-
-
-  // Inside server.js
-socket.on("pick-task", ({ type, questionText }) => {
+  // ── PICK TASK (player chose Truth or Dare) ────────────────
+  socket.on("pick-task", ({ type, questionText }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room) return;
 
     room.gameState.phase = "task";
     room.gameState.currentTask = { type, text: questionText };
 
-    // Broadcast to EVERYONE in the room including the sender (host)
     io.to(room.id).emit("task-assigned", {
-        type: type,
-        text: questionText,
-        player: room.gameState.currentPlayer
+      type,
+      text: questionText,
+      player: room.gameState.currentPlayer,
+      difficulty: room.settings.difficulty,
+      spicyCategory: room.settings.spicyCategory,
     });
-});
+  });
 
+  // ── NEW QUESTION (player skipped, get a replacement) ──────
   socket.on("new-question", ({ type, questionText }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "task") return;
 
     room.gameState.currentTask = { type, text: questionText };
-    
+
     io.to(room.id).emit("task-assigned", {
       type,
       text: questionText,
-      player: room.gameState.currentPlayer, 
+      player: room.gameState.currentPlayer,
+      difficulty: room.settings.difficulty,
+      spicyCategory: room.settings.spicyCategory,
     });
   });
-socket.on("task-assigned", ({ type, text, player }) => {
-    hideWaitingOverlay();
 
-    const canAct = (player === myPlayerName || isHost);
-
-    // ── 1. Update modal header for EVERYONE ──
-    const modalPlayerEl = document.getElementById("modal-player");
-    if (modalPlayerEl) {
-        modalPlayerEl.textContent = player.toUpperCase();
-        modalPlayerEl.className = "modal-player" + (isSpecialName(player) ? " gold-modal" : "");
-    }
-
-    // ── 2. Update subtitle so spectators never see "Choose your fate" ──
-    const modalSubtitle = document.getElementById("modal-subtitle");
-    if (modalSubtitle) {
-        modalSubtitle.textContent = canAct
-            ? "Complete your challenge! 🔥"
-            : `👀 ${player} is doing a ${type.toUpperCase()}`;
-    }
-
-    // ── 3. Hide choice buttons for EVERYONE ──
-    const choiceBtns = document.getElementById("choice-btns");
-    if (choiceBtns) choiceBtns.style.display = "none";
-
-    // ── 4. Build the task card for EVERYONE ──
-    const taskArea = document.getElementById("task-area");
-    if (taskArea) {
-        taskArea.innerHTML = buildOnlineTaskCard(type, text, player);
-    }
-
-    // ── 5. Make sure modal is open for EVERYONE ──
-    const modal = document.getElementById("choice-modal");
-    if (modal) modal.classList.add("open");
-
-    // ── 6. Set button permissions (only active player / host can press Done/Skip) ──
-    document.querySelectorAll(".btn-done, .btn-skip, .btn-switch-dare").forEach((btn) => {
-        btn.disabled = !canAct;
-        btn.style.opacity = canAct ? "1" : "0.45";
-        btn.style.pointerEvents = canAct ? "auto" : "none";
-        // Add visual label so spectators understand why buttons are greyed
-        if (!canAct && btn.classList.contains("btn-done")) {
-            btn.textContent = "⏳ Waiting...";
-        }
-    });
-
-    if (typeof startTimer === "function") startTimer(type);
-});
-
-    // 5. Update UI text
-    const modalPlayer = document.getElementById("modal-player");
-    if (modalPlayer) modalPlayer.textContent = player;
-
-    // 6. Start the local timer and cleanup animations
-    if (typeof startTimer === "function") startTimer(type);
-    
-    // 🔥 Cleanup: If the bottle was spinning, stop the animation
-    const bottle = document.getElementById("bottle");
-    if (bottle) bottle.style.transition = "none";
-});
-
+  // ── COMPLETE TASK ─────────────────────────────────────────
   socket.on("complete-task", ({ type }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.gameState.phase !== "task") return;
@@ -492,47 +286,78 @@ socket.on("task-assigned", ({ type, text, player }) => {
     room.gameState.phase = "playing";
     room.gameState.currentTask = null;
     broadcastRoom(room.id);
-    io.to(room.id).emit("task-completed", {
-      round: room.gameState.round,
+    io.to(room.id).emit("task-completed", { round: room.gameState.round });
+  });
+
+  // ── NEVER HAVE I EVER ─────────────────────────────────────
+  socket.on("nihhi-admit", ({ admitted }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room) return;
+
+    const playerName = socket.data.playerName;
+    if (!room.gameState.admittedSet) room.gameState.admittedSet = new Set();
+
+    if (admitted) {
+      room.gameState.admittedSet.add(playerName);
+    } else {
+      room.gameState.admittedSet.delete(playerName);
+    }
+
+    io.to(room.id).emit("nihhi-update-admissions", {
+      admittedPlayers: Array.from(room.gameState.admittedSet),
     });
   });
 
-  socket.on("end-game", () => {
+  socket.on("nihhi-next", ({ questionText, round }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
 
-    const finalData = room.players.map(p => ({
-        name: p.name,
-        stats: p.stats,
-        emoji: p.emoji
-    }));
+    if (room.gameState.admittedSet) {
+      room.gameState.admittedSet.forEach((name) => {
+        const player = room.players.find((p) => p.name === name);
+        if (player) {
+          if (player.stats.fingers === undefined) player.stats.fingers = 5;
+          if (player.stats.fingers > 0) player.stats.fingers--;
+        }
+      });
+    }
 
-    io.to(room.id).emit("show-summary", { players: finalData });
-    io.to(room.id).emit("game-ended"); 
+    room.gameState.admittedSet = new Set();
+    room.gameState.round = round;
+    room.gameState.currentTask = { text: questionText };
 
-    room.gameState.phase = "lobby";
-    room.gameState.round = 1;
-    room.gameState.currentPlayer = null;
-    room.gameState.admittedSet = new Set(); 
-
-    room.players.forEach((p) => {
-      p.stats = { truth: 0, dare: 0, skip: 0, fingers: 5 }; 
-      p.eliminated = false;
-    });
-
+    io.to(room.id).emit("nihhi-question", { text: questionText, round });
     broadcastRoom(room.id);
   });
 
-  socket.on("close-room", () => {
-    const room = rooms.get(socket.data.roomId);
-    if (!room || room.hostSocketId !== socket.id) return;
-    io.to(socket.data.roomId).emit("room-closed");
-    rooms.delete(socket.data.roomId);
+  // ── GEM MODE ──────────────────────────────────────────────
+  socket.on("spawn-gem", ({ x, y }) => {
+    const roomId = socket.data.roomId;
+    if (roomId) io.to(roomId).emit("spawn-gem", { x, y });
   });
 
+  socket.on("claim-gem", ({ playerName }) => {
+    const roomId = socket.data.roomId;
+    if (roomId) io.to(roomId).emit("gem-claimed", { playerName });
+  });
+
+  socket.on("gem-skip", ({ playerName }) => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.gameState.phase !== "task") return;
+
+    room.gameState.round++;
+    room.gameState.phase = "playing";
+    room.gameState.currentTask = null;
+
+    broadcastRoom(room.id);
+    io.to(room.id).emit("gem-skip-used", { playerName, round: room.gameState.round });
+  });
+
+  // ── CHAT & REACTIONS ──────────────────────────────────────
   socket.on("chat-message", ({ message }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || !message.trim()) return;
+
     const msg = {
       player: socket.data.playerName,
       message: message.trim().substring(0, 200),
@@ -551,9 +376,11 @@ socket.on("task-assigned", ({ type, text, player }) => {
       });
   });
 
+  // ── KICK PLAYER ───────────────────────────────────────────
   socket.on("kick-player", ({ playerName }) => {
     const room = rooms.get(socket.data.roomId);
     if (!room || room.hostSocketId !== socket.id) return;
+
     const target = room.players.find((p) => p.name === playerName && !p.isHost);
     if (!target) return;
 
@@ -567,6 +394,41 @@ socket.on("task-assigned", ({ type, text, player }) => {
     broadcastRoom(room.id);
   });
 
+  // ── END / CLOSE GAME ──────────────────────────────────────
+  socket.on("end-game", () => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.hostSocketId !== socket.id) return;
+
+    const finalData = room.players.map((p) => ({
+      name: p.name,
+      stats: p.stats,
+      emoji: p.emoji,
+    }));
+
+    io.to(room.id).emit("show-summary", { players: finalData });
+    io.to(room.id).emit("game-ended");
+
+    room.gameState.phase = "lobby";
+    room.gameState.round = 1;
+    room.gameState.currentPlayer = null;
+    room.gameState.admittedSet = new Set();
+
+    room.players.forEach((p) => {
+      p.stats = { truth: 0, dare: 0, skip: 0, fingers: 5 };
+      p.eliminated = false;
+    });
+
+    broadcastRoom(room.id);
+  });
+
+  socket.on("close-room", () => {
+    const room = rooms.get(socket.data.roomId);
+    if (!room || room.hostSocketId !== socket.id) return;
+    io.to(socket.data.roomId).emit("room-closed");
+    rooms.delete(socket.data.roomId);
+  });
+
+  // ── DISCONNECT ────────────────────────────────────────────
   socket.on("disconnect", () => {
     const roomId = socket.data.roomId;
     if (!roomId) return;
@@ -575,29 +437,31 @@ socket.on("task-assigned", ({ type, text, player }) => {
     if (!room) return;
 
     const player = room.players.find((p) => p.socketId === socket.id);
-    if (player) {
-      player.offline = true;
-      io.to(roomId).emit("player-left", { playerName: player.name, offline: true });
+    if (!player) return;
 
-      if (player.isHost) {
-        player.isHost = false;
-        const nextOnline = room.players.find((p) => !p.offline);
-        if (nextOnline) {
-          nextOnline.isHost = true;
-          room.hostSocketId = nextOnline.socketId;
-          io.to(roomId).emit("host-changed", { newHost: nextOnline.name });
-        }
-      }
+    player.offline = true;
+    io.to(roomId).emit("player-left", { playerName: player.name, offline: true });
 
-      const activePlayers = room.players.filter((p) => !p.offline);
-      if (activePlayers.length === 0) {
-        rooms.delete(roomId);
-      } else {
-        broadcastRoom(roomId);
+    if (player.isHost) {
+      player.isHost = false;
+      const nextOnline = room.players.find((p) => !p.offline);
+      if (nextOnline) {
+        nextOnline.isHost = true;
+        room.hostSocketId = nextOnline.socketId;
+        io.to(roomId).emit("host-changed", { newHost: nextOnline.name });
       }
     }
+
+    const activePlayers = room.players.filter((p) => !p.offline);
+    if (activePlayers.length === 0) {
+      rooms.delete(roomId);
+    } else {
+      broadcastRoom(roomId);
+    }
   });
+});
 
 app.get("/", (req, res) => res.json({ status: "Online 🔥" }));
+
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => console.log(`🔥 Server on ${PORT}`));
+server.listen(PORT, () => console.log(`🔥 Server on port ${PORT}`));
